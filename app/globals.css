@@ -1,0 +1,33 @@
+@import "tailwindcss";
+
+/* Floating emoji animation */
+@keyframes reactionFloat {
+  0%   { transform: translateY(0) scale(1);   opacity: 1; }
+  80%  { transform: translateY(-160px) scale(1.4); opacity: 0.9; }
+  100% { transform: translateY(-200px) scale(0.8); opacity: 0; }
+}
+
+.reaction-float {
+  position: absolute;
+  bottom: 80px;
+  font-size: 2rem;
+  animation: reactionFloat 2.8s ease-out forwards;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* Range input — vertical writing-mode trick for volume slider */
+input[type="range"][style*="writing-mode"] {
+  appearance: slider-vertical;
+}
+
+/* Hide scrollbars but keep scrollability */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+html, body {
+  height: 100%;
+  background: #09090b; /* zinc-950 */
+  color: white;
+  font-family: system-ui, -apple-system, sans-serif;
+}
