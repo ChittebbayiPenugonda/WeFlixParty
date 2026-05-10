@@ -130,7 +130,8 @@ export default function Room({ roomId, isHost }: RoomProps) {
 
   const [copied, setCopied] = useState(false);
   const copyLink = useCallback(() => {
-    const url = `${window.location.origin}${window.location.pathname.replace(/\/$/, '')}/room?id=${roomId}`;
+    const base = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
+    const url = `${window.location.origin}${base}/room?id=${roomId}`;
     navigator.clipboard.writeText(url).catch(() => undefined);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
