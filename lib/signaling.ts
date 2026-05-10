@@ -3,8 +3,9 @@
  *
  * Room document layout:
  *   rooms/{roomId}
- *     offer          { type, sdp }
- *     answer         { type, sdp }
+ *     offer          { type, sdp, ts }   — ts used to detect renegotiation
+ *     answer         { type, sdp, ts }
+ *     guestJoined    boolean             — guest sets true to trigger host offer
  *     hostScreenStreamId  string | null
  *     guestScreenStreamId string | null
  *     sync           { event, currentTime, ts }
@@ -56,6 +57,7 @@ export async function createRoom(roomId: string): Promise<void> {
     createdAt: serverTimestamp(),
     offer: null,
     answer: null,
+    guestJoined: false,
     hostScreenStreamId: null,
     guestScreenStreamId: null,
     sync: null,
@@ -67,39 +69,63 @@ export async function roomExists(roomId: string): Promise<boolean> {
   return snap.exists();
 }
 
+// ─── Guest presence ────────────────────────────────────────────────────────
+
+export async function signalGuestJoined(roomId: string): Promise<void> {
+  await updateDoc(doc(db, 'rooms', roomId), { guestJoined: true });
+}
+
+export function onGuestJoined(roomId: string, cb: () => void): Unsubscribe {
+  let fired = false;
+  return onSnapshot(doc(db, 'rooms', roomId), (snap) => {
+    if (fired) return;
+    const data = snap.data();
+    if (data?.guestJoined === true) {
+      fired = true;
+      cb();
+    }
+  });
+}
+
 // ─── SDP offer / answer ────────────────────────────────────────────────────
+
+export interface TimestampedSDP extends RTCSessionDescriptionInit {
+  ts: number;
+}
 
 export async function writeOffer(
   roomId: string,
   offer: RTCSessionDescriptionInit,
 ): Promise<void> {
-  await updateDoc(doc(db, 'rooms', roomId), { offer });
+  const payload: TimestampedSDP = { ...offer, ts: Date.now() };
+  await updateDoc(doc(db, 'rooms', roomId), { offer: payload, answer: null });
 }
 
 export async function writeAnswer(
   roomId: string,
   answer: RTCSessionDescriptionInit,
 ): Promise<void> {
-  await updateDoc(doc(db, 'rooms', roomId), { answer });
+  const payload: TimestampedSDP = { ...answer, ts: Date.now() };
+  await updateDoc(doc(db, 'rooms', roomId), { answer: payload });
 }
 
 export function onOffer(
   roomId: string,
-  cb: (offer: RTCSessionDescriptionInit) => void,
+  cb: (offer: TimestampedSDP) => void,
 ): Unsubscribe {
   return onSnapshot(doc(db, 'rooms', roomId), (snap) => {
     const data = snap.data();
-    if (data?.offer) cb(data.offer as RTCSessionDescriptionInit);
+    if (data?.offer) cb(data.offer as TimestampedSDP);
   });
 }
 
 export function onAnswer(
   roomId: string,
-  cb: (answer: RTCSessionDescriptionInit) => void,
+  cb: (answer: TimestampedSDP) => void,
 ): Unsubscribe {
   return onSnapshot(doc(db, 'rooms', roomId), (snap) => {
     const data = snap.data();
-    if (data?.answer) cb(data.answer as RTCSessionDescriptionInit);
+    if (data?.answer) cb(data.answer as TimestampedSDP);
   });
 }
 

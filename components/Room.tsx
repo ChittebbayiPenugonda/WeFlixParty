@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import { createRoom, roomExists } from '@/lib/signaling';
+import { createRoom, roomExists, signalGuestJoined } from '@/lib/signaling';
 import { useWebRTC } from '@/hooks/useWebRTC';
 import { useAudioDucking } from '@/hooks/useAudioDucking';
 import FaceCam from './FaceCam';
@@ -47,7 +47,6 @@ export default function Room({ roomId, isHost }: RoomProps) {
     stopScreenShare,
     toggleMic,
     toggleCam,
-    initiateCall,
   } = useWebRTC({
     roomId,
     isHost,
@@ -74,11 +73,13 @@ export default function Room({ roomId, isHost }: RoomProps) {
         if (stream) startVAD(stream);
 
         if (isHost) {
-          // host waits for guest to arrive then fires offer via onnegotiationneeded
+          // Host waits. The signaling listener in useWebRTC fires the offer
+          // automatically once the guest signals their presence via Firestore.
           setStep('waiting');
-          await initiateCall();
         } else {
-          setStep('waiting'); // guest waits for host's offer
+          // Guest signals presence — this triggers the host to create the offer.
+          await signalGuestJoined(roomId);
+          setStep('waiting');
         }
       } catch (err) {
         console.error('init failed', err);

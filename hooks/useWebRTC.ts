@@ -6,16 +6,21 @@ import {
   writeAnswer,
   onOffer,
   onAnswer,
+  onGuestJoined,
+  signalGuestJoined,
   addIceCandidate,
   onIceCandidates,
   setScreenStreamId,
   onScreenStreamIds,
+  type TimestampedSDP,
 } from '@/lib/signaling';
 
 const ICE_CONFIG: RTCConfiguration = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
   ],
 };
 
@@ -28,8 +33,8 @@ interface UseWebRTCOptions {
 
 export interface WebRTCState {
   localStream: MediaStream | null;
-  remoteStream: MediaStream | null;        // remote webcam
-  remoteScreenStream: MediaStream | null;  // remote screen share
+  remoteStream: MediaStream | null;
+  remoteScreenStream: MediaStream | null;
   isScreenSharing: boolean;
   isMicOn: boolean;
   isCamOn: boolean;
@@ -48,8 +53,12 @@ export function useWebRTC({
   const pendingCandidates = useRef<RTCIceCandidateInit[]>([]);
   const remoteDescSet = useRef(false);
   const makingOffer = useRef(false);
-  // track which remote stream ID is screen share
   const remoteScreenIdRef = useRef<string | null>(null);
+
+  // Track which offer/answer timestamps we've already processed to prevent
+  // Firestore snapshot re-fires from reprocessing the same SDP.
+  const lastOfferTs = useRef(0);
+  const lastAnswerTs = useRef(0);
 
   const [state, setState] = useState<WebRTCState>({
     localStream: null,
@@ -61,8 +70,6 @@ export function useWebRTC({
     connectionState: 'idle',
   });
 
-  // ── helpers ──────────────────────────────────────────────────────────────
-
   function updateState(partial: Partial<WebRTCState>) {
     setState((prev) => ({ ...prev, ...partial }));
   }
@@ -72,38 +79,44 @@ export function useWebRTC({
     for (const c of pendingCandidates.current) {
       try {
         await pc.current.addIceCandidate(new RTCIceCandidate(c));
-      } catch (_) { /* ignore */ }
+      } catch (_) { /* stale candidates are harmless */ }
     }
     pendingCandidates.current = [];
   }
 
   // ── build peer connection ─────────────────────────────────────────────────
 
-  function buildPC(): RTCPeerConnection {
+  const buildPC = useCallback((): RTCPeerConnection => {
     const conn = new RTCPeerConnection(ICE_CONFIG);
 
     conn.onicecandidate = ({ candidate }) => {
       if (!candidate) return;
       const role = isHost ? 'offerCandidates' : 'answerCandidates';
-      addIceCandidate(roomId, role, candidate.toJSON());
+      addIceCandidate(roomId, role, candidate.toJSON()).catch(console.error);
     };
 
     conn.onconnectionstatechange = () => {
+      console.log('[WebRTC] connectionState:', conn.connectionState);
       updateState({ connectionState: conn.connectionState });
       if (conn.connectionState === 'connected') onPeerConnected?.();
-      if (
-        conn.connectionState === 'disconnected' ||
-        conn.connectionState === 'failed'
-      ) onPeerDisconnected?.();
+      if (conn.connectionState === 'disconnected' || conn.connectionState === 'failed') {
+        onPeerDisconnected?.();
+      }
     };
 
-    // collect all incoming tracks into streams
+    conn.oniceconnectionstatechange = () => {
+      console.log('[WebRTC] iceConnectionState:', conn.iceConnectionState);
+      if (conn.iceConnectionState === 'connected' || conn.iceConnectionState === 'completed') {
+        onPeerConnected?.();
+      }
+    };
+
     conn.ontrack = ({ track, streams }) => {
       const stream = streams[0];
       if (!stream) return;
+      console.log('[WebRTC] ontrack:', track.kind, 'streamId:', stream.id, 'remoteScreenId:', remoteScreenIdRef.current);
 
       if (stream.id === remoteScreenIdRef.current) {
-        // this track belongs to the remote screen share stream
         setState((prev) => {
           if (prev.remoteScreenStream?.id === stream.id) return prev;
           return { ...prev, remoteScreenStream: stream };
@@ -116,24 +129,32 @@ export function useWebRTC({
       }
     };
 
+    // onnegotiationneeded only runs after initial connection for renegotiation
+    // (screen share add/remove). The initial offer is triggered by guestJoined.
     conn.onnegotiationneeded = async () => {
-      // only the host drives renegotiation to avoid glare
-      if (!isHost || makingOffer.current) return;
+      if (!isHost) return;
+      if (!remoteDescSet.current) return; // not yet connected; initial offer handled separately
+      if (makingOffer.current) return;
+      console.log('[WebRTC] renegotiation needed');
       try {
         makingOffer.current = true;
-        await conn.setLocalDescription();
-        if (conn.localDescription) await writeOffer(roomId, conn.localDescription);
+        const offer = await conn.createOffer();
+        if (conn.signalingState !== 'stable') return;
+        await conn.setLocalDescription(offer);
+        await writeOffer(roomId, conn.localDescription!);
+      } catch (e) {
+        console.error('[WebRTC] renegotiation offer failed:', e);
       } finally {
         makingOffer.current = false;
       }
     };
 
     return conn;
-  }
+  }, [roomId, isHost, onPeerConnected, onPeerDisconnected]);
 
-  // ── start webcam ─────────────────────────────────────────────────────────
+  // ── start webcam ──────────────────────────────────────────────────────────
 
-  const startWebcam = useCallback(async () => {
+  const startWebcam = useCallback(async (): Promise<MediaStream | null> => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: true,
@@ -142,166 +163,184 @@ export function useWebRTC({
       localStreamRef.current = stream;
       updateState({ localStream: stream, isMicOn: true, isCamOn: true });
 
-      if (!pc.current) {
-        pc.current = buildPC();
-      }
+      if (!pc.current) pc.current = buildPC();
       stream.getTracks().forEach((t) => pc.current!.addTrack(t, stream));
+      console.log('[WebRTC] webcam started, tracks added');
       return stream;
     } catch (err) {
-      console.error('getUserMedia failed', err);
+      console.error('[WebRTC] getUserMedia failed:', err);
       return null;
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roomId, isHost]);
+  }, [buildPC]);
 
   // ── screen share ──────────────────────────────────────────────────────────
 
-  const startScreenShare = useCallback(async () => {
+  const startScreenShare = useCallback(async (): Promise<MediaStream | null> => {
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: true,
-        audio: true, // capture tab audio when available
+        audio: true,
       });
       screenStreamRef.current = stream;
 
-      // tell the remote peer which stream ID is our screen share
       const role = isHost ? 'hostScreenStreamId' : 'guestScreenStreamId';
       await setScreenStreamId(roomId, role, stream.id);
 
       if (!pc.current) pc.current = buildPC();
       stream.getTracks().forEach((t) => pc.current!.addTrack(t, stream));
+      console.log('[WebRTC] screen share started, streamId:', stream.id);
 
       updateState({ isScreenSharing: true });
-
       stream.getVideoTracks()[0].onended = () => stopScreenShare();
       return stream;
     } catch (err) {
-      console.error('getDisplayMedia failed', err);
+      console.error('[WebRTC] getDisplayMedia failed:', err);
       return null;
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roomId, isHost]);
+  }, [roomId, isHost, buildPC]);
 
   const stopScreenShare = useCallback(async () => {
     const stream = screenStreamRef.current;
     if (!stream) return;
-
     stream.getTracks().forEach((t) => {
       t.stop();
-      const sender = pc.current
-        ?.getSenders()
-        .find((s) => s.track?.id === t.id);
+      const sender = pc.current?.getSenders().find((s) => s.track?.id === t.id);
       if (sender) pc.current?.removeTrack(sender);
     });
-
     screenStreamRef.current = null;
     const role = isHost ? 'hostScreenStreamId' : 'guestScreenStreamId';
     await setScreenStreamId(roomId, role, null);
-    updateState({ isScreenSharing: false });
+    updateState({ isScreenSharing: false, remoteScreenStream: null });
   }, [roomId, isHost]);
 
   // ── mic / cam toggles ─────────────────────────────────────────────────────
 
   const toggleMic = useCallback(() => {
-    const stream = localStreamRef.current;
-    if (!stream) return;
-    stream.getAudioTracks().forEach((t) => {
-      t.enabled = !t.enabled;
-    });
-    updateState({ isMicOn: localStreamRef.current!.getAudioTracks()[0]?.enabled ?? false });
+    const tracks = localStreamRef.current?.getAudioTracks() ?? [];
+    tracks.forEach((t) => { t.enabled = !t.enabled; });
+    updateState({ isMicOn: tracks[0]?.enabled ?? false });
   }, []);
 
   const toggleCam = useCallback(() => {
-    const stream = localStreamRef.current;
-    if (!stream) return;
-    stream.getVideoTracks().forEach((t) => {
-      t.enabled = !t.enabled;
-    });
-    updateState({ isCamOn: localStreamRef.current!.getVideoTracks()[0]?.enabled ?? false });
+    const tracks = localStreamRef.current?.getVideoTracks() ?? [];
+    tracks.forEach((t) => { t.enabled = !t.enabled; });
+    updateState({ isCamOn: tracks[0]?.enabled ?? false });
   }, []);
+
+  // ── create initial offer (host only, called after guest joins) ─────────────
+
+  const createInitialOffer = useCallback(async () => {
+    if (!isHost || !pc.current) return;
+    if (makingOffer.current) return;
+    console.log('[WebRTC] creating initial offer');
+    try {
+      makingOffer.current = true;
+      const offer = await pc.current.createOffer();
+      await pc.current.setLocalDescription(offer);
+      await writeOffer(roomId, pc.current.localDescription!);
+      console.log('[WebRTC] initial offer written to Firestore');
+    } catch (e) {
+      console.error('[WebRTC] createInitialOffer failed:', e);
+    } finally {
+      makingOffer.current = false;
+    }
+  }, [roomId, isHost]);
 
   // ── signaling listeners ───────────────────────────────────────────────────
 
   useEffect(() => {
     if (!roomId) return;
-
     const unsubs: Array<() => void> = [];
 
-    // track which stream ID the remote is using for screen share
     unsubs.push(
       onScreenStreamIds(roomId, (hostId, guestId) => {
-        // if I'm the host, the remote's screen stream = guestId, and vice versa
         remoteScreenIdRef.current = isHost ? guestId : hostId;
+        console.log('[WebRTC] remoteScreenId:', remoteScreenIdRef.current);
       }),
     );
 
     if (isHost) {
-      // host: wait for guest's answer
+      // Host waits for guest to signal presence, then creates the initial offer
       unsubs.push(
-        onAnswer(roomId, async (answer) => {
-          if (!pc.current || pc.current.signalingState === 'stable') return;
-          await pc.current.setRemoteDescription(new RTCSessionDescription(answer));
-          remoteDescSet.current = true;
-          await drainPendingCandidates();
+        onGuestJoined(roomId, () => {
+          console.log('[WebRTC] guest joined, creating offer');
+          createInitialOffer();
         }),
       );
-      // host: collect answer ICE candidates
+
+      // Host receives guest's answer
+      unsubs.push(
+        onAnswer(roomId, async (answer: TimestampedSDP) => {
+          if (!pc.current) return;
+          if (answer.ts <= lastAnswerTs.current) return; // already processed
+          if (pc.current.signalingState !== 'have-local-offer') return;
+          lastAnswerTs.current = answer.ts;
+          console.log('[WebRTC] host received answer, applying...');
+          try {
+            await pc.current.setRemoteDescription(new RTCSessionDescription(answer));
+            remoteDescSet.current = true;
+            await drainPendingCandidates();
+            console.log('[WebRTC] remote description set (answer)');
+          } catch (e) {
+            console.error('[WebRTC] setRemoteDescription(answer) failed:', e);
+          }
+        }),
+      );
+
+      // Host collects guest's ICE candidates
       unsubs.push(
         onIceCandidates(roomId, 'answerCandidates', async (candidate) => {
           if (!pc.current) return;
           if (!remoteDescSet.current) {
             pendingCandidates.current.push(candidate);
           } else {
-            await pc.current.addIceCandidate(new RTCIceCandidate(candidate));
+            try {
+              await pc.current.addIceCandidate(new RTCIceCandidate(candidate));
+            } catch (_) { /* ignore */ }
           }
         }),
       );
     } else {
-      // guest: receive offer from host, then answer
+      // Guest receives host's offer
       unsubs.push(
-        onOffer(roomId, async (offer) => {
-          if (!pc.current) pc.current = buildPC();
-          await pc.current.setRemoteDescription(new RTCSessionDescription(offer));
-          remoteDescSet.current = true;
-          await drainPendingCandidates();
+        onOffer(roomId, async (offer: TimestampedSDP) => {
+          if (!pc.current) return;
+          if (offer.ts <= lastOfferTs.current) return; // already processed
+          lastOfferTs.current = offer.ts;
+          console.log('[WebRTC] guest received offer, processing...');
+          try {
+            await pc.current.setRemoteDescription(new RTCSessionDescription(offer));
+            remoteDescSet.current = true;
+            await drainPendingCandidates();
 
-          const answer = await pc.current.createAnswer();
-          await pc.current.setLocalDescription(answer);
-          await writeAnswer(roomId, answer);
+            const answer = await pc.current.createAnswer();
+            await pc.current.setLocalDescription(answer);
+            await writeAnswer(roomId, answer);
+            console.log('[WebRTC] answer written to Firestore');
+          } catch (e) {
+            console.error('[WebRTC] offer handling failed:', e);
+          }
         }),
       );
-      // guest: collect offer ICE candidates
+
+      // Guest collects host's ICE candidates
       unsubs.push(
         onIceCandidates(roomId, 'offerCandidates', async (candidate) => {
           if (!pc.current) return;
           if (!remoteDescSet.current) {
             pendingCandidates.current.push(candidate);
           } else {
-            await pc.current.addIceCandidate(new RTCIceCandidate(candidate));
+            try {
+              await pc.current.addIceCandidate(new RTCIceCandidate(candidate));
+            } catch (_) { /* ignore */ }
           }
         }),
       );
     }
 
-    return () => {
-      unsubs.forEach((u) => u());
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roomId, isHost]);
-
-  // ── kick off offer once webcam is ready (host only) ───────────────────────
-
-  const initiateCall = useCallback(async () => {
-    if (!isHost || !pc.current) return;
-    makingOffer.current = true;
-    try {
-      const offer = await pc.current.createOffer();
-      await pc.current.setLocalDescription(offer);
-      await writeOffer(roomId, offer);
-    } finally {
-      makingOffer.current = false;
-    }
-  }, [roomId, isHost]);
+    return () => unsubs.forEach((u) => u());
+  }, [roomId, isHost, buildPC, createInitialOffer]);
 
   // ── cleanup ───────────────────────────────────────────────────────────────
 
@@ -320,6 +359,6 @@ export function useWebRTC({
     stopScreenShare,
     toggleMic,
     toggleCam,
-    initiateCall,
+    createInitialOffer,
   };
 }
