@@ -225,7 +225,7 @@ export default function Room({ roomId, isHost }: RoomProps) {
           </div>
         )}
 
-        {/* ── face cams — video only, audio handled by <audio> below ── */}
+        {/* ── face cams — drag to move, resize handle in corner ── */}
         <FaceCam
           stream={localStream}
           label="You"
