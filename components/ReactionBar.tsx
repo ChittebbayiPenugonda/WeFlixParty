@@ -13,6 +13,7 @@ const CUSTOM_IMAGES = [
   '/customReactions/r5.png',
   '/customReactions/r6.png',
   '/customReactions/r7.jpg',
+  '/customReactions/r8.png',
 ];
 
 interface ReactionBarProps {
