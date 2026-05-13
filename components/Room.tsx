@@ -275,7 +275,6 @@ export default function Room({ roomId, isHost }: RoomProps) {
           role={role}
           onClose={() => setIsChatOpen(false)}
           onCommand={handleCommand}
-          customMode={customReactions}
         />
       )}
     </div>

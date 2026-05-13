@@ -8,23 +8,14 @@ interface ChatSidebarProps {
   role: 'host' | 'guest';
   onClose: () => void;
   onCommand?: (cmd: string) => void;
-  customMode?: boolean;
 }
 
-const COMMANDS: Record<string, string> = {
-  '/react_mr': 'Switched to custom reactions 🎉',
-};
+// Silent slash commands — no UI hint, no feedback. Easter egg only.
+const COMMANDS = new Set(['/react_mr']);
 
-export default function ChatSidebar({
-  roomId,
-  role,
-  onClose,
-  onCommand,
-  customMode = false,
-}: ChatSidebarProps) {
+export default function ChatSidebar({ roomId, role, onClose, onCommand }: ChatSidebarProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
-  const [localNotice, setLocalNotice] = useState('');
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -41,17 +32,9 @@ export default function ChatSidebar({
     const text = input.trim();
     if (!text) return;
 
-    // Intercept slash commands — don't send them as chat messages
     if (text.startsWith('/')) {
-      const notice = COMMANDS[text];
-      if (notice) {
-        onCommand?.(text.slice(1)); // e.g. 'react_mr'
-        setLocalNotice(notice);
-        setTimeout(() => setLocalNotice(''), 3000);
-      } else {
-        setLocalNotice(`Unknown command: ${text}`);
-        setTimeout(() => setLocalNotice(''), 2000);
-      }
+      if (COMMANDS.has(text)) onCommand?.(text.slice(1));
+      // Unknown commands are silently discarded — no error shown
       setInput('');
       return;
     }
@@ -64,14 +47,7 @@ export default function ChatSidebar({
     <div className="flex flex-col h-full bg-zinc-900 border-l border-white/10 w-72 shrink-0">
       {/* header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
-        <div className="flex items-center gap-2">
-          <span className="text-white font-medium text-sm">Chat</span>
-          {customMode && (
-            <span className="text-xs bg-indigo-600/60 text-indigo-200 px-2 py-0.5 rounded-full">
-              custom reactions on
-            </span>
-          )}
-        </div>
+        <span className="text-white font-medium text-sm">Chat</span>
         <button
           onClick={onClose}
           className="text-white/40 hover:text-white transition-colors text-lg leading-none"
@@ -80,16 +56,9 @@ export default function ChatSidebar({
         </button>
       </div>
 
-      {/* local notice (command feedback) */}
-      {localNotice && (
-        <div className="mx-3 mt-2 px-3 py-1.5 bg-indigo-600/30 text-indigo-200 text-xs rounded-lg">
-          {localNotice}
-        </div>
-      )}
-
       {/* messages */}
       <div className="flex-1 overflow-y-auto px-3 py-2 space-y-2 text-sm">
-        {messages.length === 0 && !localNotice && (
+        {messages.length === 0 && (
           <p className="text-white/30 text-xs text-center mt-4">
             No messages yet. Say hi! 👋
           </p>
@@ -104,9 +73,7 @@ export default function ChatSidebar({
             </span>
             <div
               className={`px-3 py-1.5 rounded-2xl max-w-[90%] break-words ${
-                m.sender === role
-                  ? 'bg-indigo-600 text-white'
-                  : 'bg-white/10 text-white'
+                m.sender === role ? 'bg-indigo-600 text-white' : 'bg-white/10 text-white'
               }`}
             >
               {m.text}
