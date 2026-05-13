@@ -71,6 +71,7 @@ export async function createRoom(roomId: string): Promise<void> {
     hostScreenStreamId: null,
     guestScreenStreamId: null,
     sync: null,
+    speaking: null,
   });
 }
 
@@ -284,5 +285,33 @@ export function onChatMessages(
   );
   return onSnapshot(q, (snap) => {
     cb(snap.docs.map((d) => d.data() as ChatMessage));
+  });
+}
+
+// ─── Push-to-talk speaking signal ─────────────────────────────────────────
+// When a peer presses spacebar they write their role here so the other person
+// can duck their own movie audio immediately.
+
+export async function setSpeaking(
+  roomId: string,
+  role: 'host' | 'guest',
+  speaking: boolean,
+): Promise<void> {
+  await updateDoc(doc(db, 'rooms', roomId), {
+    speaking: speaking ? role : null,
+  });
+}
+
+export function onRemoteSpeaking(
+  roomId: string,
+  myRole: 'host' | 'guest',
+  cb: (speaking: boolean) => void,
+): Unsubscribe {
+  let last: boolean | null = null;
+  return onSnapshot(doc(db, 'rooms', roomId), (snap) => {
+    const speakingRole = snap.data()?.speaking ?? null;
+    // Only react when the OTHER person is the one signalling
+    const active = speakingRole !== null && speakingRole !== myRole;
+    if (active !== last) { last = active; cb(active); }
   });
 }

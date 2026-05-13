@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import { createRoom, roomExists, signalGuestJoined, setPresence, pruneRoomIfEmpty } from '@/lib/signaling';
+import { createRoom, roomExists, signalGuestJoined, setPresence, pruneRoomIfEmpty, setSpeaking, onRemoteSpeaking } from '@/lib/signaling';
 import { useWebRTC } from '@/hooks/useWebRTC';
 import { useAudioDucking } from '@/hooks/useAudioDucking';
 import FaceCam from './FaceCam';
@@ -144,13 +144,25 @@ export default function Room({ roomId, isHost }: RoomProps) {
 
   const handleDuckStart = useCallback(() => {
     setIsManualDucking(true);
-    pushToTalkStart();
-  }, [pushToTalkStart]);
+    // Signal the remote peer to duck their movie audio
+    setSpeaking(roomId, role, true).catch(console.error);
+  }, [roomId, role]);
 
   const handleDuckEnd = useCallback(() => {
     setIsManualDucking(false);
-    pushToTalkEnd();
-  }, [pushToTalkEnd]);
+    setSpeaking(roomId, role, false).catch(console.error);
+  }, [roomId, role]);
+
+  // ── listen for remote spacebar — duck LOCAL movie when they signal ─────────
+
+  useEffect(() => {
+    if (!roomId) return;
+    const unsub = onRemoteSpeaking(roomId, role, (speaking) => {
+      if (speaking) pushToTalkStart();
+      else pushToTalkEnd();
+    });
+    return unsub;
+  }, [roomId, role, pushToTalkStart, pushToTalkEnd]);
 
   // ── spacebar push-to-talk (skip when typing in chat input) ───────────────
 
