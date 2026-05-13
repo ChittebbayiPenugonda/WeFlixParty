@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { sendReaction, onReactions, type Reaction } from '@/lib/signaling';
 
 const DEFAULT_EMOJIS = ['😂', '🤯', '😱', '❤️', '👏', '😭', '🔥', '💀'];
@@ -16,6 +17,31 @@ const CUSTOM_IMAGES = [
   '/customReactions/r8.png',
 ];
 
+// Spawn into document.body via portal so reactions always float above
+// every stacking context (screen share windows, face cams, controls bar).
+function spawnReaction(value: string, basePath: string) {
+  const stage = document.getElementById('reaction-stage');
+  if (!stage) return;
+
+  const isImage = value.startsWith('img:');
+  const el = document.createElement('div');
+  el.className = 'reaction-float';
+  el.style.left = `${10 + Math.random() * 80}%`;
+
+  if (isImage) {
+    const img = document.createElement('img');
+    img.src = basePath + value.slice(4);
+    img.style.cssText = 'width:100px;height:auto;border-radius:10px;pointer-events:none;filter:drop-shadow(0 4px 12px rgba(0,0,0,.5))';
+    el.appendChild(img);
+  } else {
+    el.textContent = value;
+    el.style.fontSize = '2.2rem';
+  }
+
+  stage.appendChild(el);
+  setTimeout(() => el.remove(), 2800);
+}
+
 interface ReactionBarProps {
   roomId: string;
   role: 'host' | 'guest';
@@ -24,39 +50,13 @@ interface ReactionBarProps {
 }
 
 export default function ReactionBar({ roomId, role, customMode = false, basePath = '' }: ReactionBarProps) {
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  const spawnReaction = useCallback((value: string) => {
-    const container = containerRef.current;
-    if (!container) return;
-
-    const isImage = value.startsWith('img:');
-    const el = document.createElement('div');
-    el.className = 'reaction-float';
-    el.style.left = `${10 + Math.random() * 80}%`;
-
-    if (isImage) {
-      const src = basePath + value.slice(4); // strip 'img:' prefix
-      const img = document.createElement('img');
-      img.src = src;
-      img.style.cssText = 'width:90px;height:auto;border-radius:8px;pointer-events:none;';
-      el.appendChild(img);
-    } else {
-      el.textContent = value;
-      el.style.fontSize = '2rem';
-    }
-
-    container.appendChild(el);
-    setTimeout(() => el.remove(), 2800);
-  }, [basePath]);
-
   useEffect(() => {
     if (!roomId) return;
     const unsub = onReactions(roomId, (r: Reaction) => {
-      spawnReaction(r.emoji);
+      spawnReaction(r.emoji, basePath);
     });
     return unsub;
-  }, [roomId, spawnReaction]);
+  }, [roomId, basePath]);
 
   const handleClick = useCallback(
     (value: string) => {
@@ -65,15 +65,22 @@ export default function ReactionBar({ roomId, role, customMode = false, basePath
     [roomId, role],
   );
 
+  // The floating stage lives in <body> via portal — escapes all stacking contexts.
+  const stage = typeof document !== 'undefined'
+    ? createPortal(
+        <div
+          id="reaction-stage"
+          className="pointer-events-none fixed inset-0 overflow-hidden"
+          style={{ zIndex: 9999 }}
+        />,
+        document.body,
+      )
+    : null;
+
   return (
     <>
-      {/* floating reaction stage */}
-      <div
-        ref={containerRef}
-        className="pointer-events-none fixed inset-0 z-30 overflow-hidden"
-      />
+      {stage}
 
-      {/* buttons */}
       <div className="flex items-center gap-1">
         {customMode
           ? CUSTOM_IMAGES.map((src, i) => (
@@ -83,11 +90,7 @@ export default function ReactionBar({ roomId, role, customMode = false, basePath
                 className="w-9 h-9 rounded-lg overflow-hidden hover:scale-110 active:scale-95 transition-transform border border-white/10"
                 aria-label={`Custom reaction ${i + 1}`}
               >
-                <img
-                  src={basePath + src}
-                  alt=""
-                  className="w-full h-full object-cover"
-                />
+                <img src={basePath + src} alt="" className="w-full h-full object-cover" />
               </button>
             ))
           : DEFAULT_EMOJIS.map((e) => (

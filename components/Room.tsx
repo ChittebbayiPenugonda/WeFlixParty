@@ -37,6 +37,8 @@ export default function Room({ roomId, isHost }: RoomProps) {
     startVAD,
     stopVAD,
     setMovieVolume: setDuckGain,
+    pushToTalkStart,
+    pushToTalkEnd,
   } = useAudioDucking();
 
   const {
@@ -130,6 +132,28 @@ export default function Room({ roomId, isHost }: RoomProps) {
     (v: number) => { setMovieVolume(v); setDuckGain(v); },
     [setDuckGain],
   );
+
+  // ── spacebar push-to-talk (skip when typing in chat input) ───────────────
+
+  useEffect(() => {
+    const down = (e: KeyboardEvent) => {
+      if (e.code !== 'Space' || e.repeat) return;
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      e.preventDefault();
+      pushToTalkStart();
+    };
+    const up = (e: KeyboardEvent) => {
+      if (e.code !== 'Space') return;
+      pushToTalkEnd();
+    };
+    window.addEventListener('keydown', down);
+    window.addEventListener('keyup', up);
+    return () => {
+      window.removeEventListener('keydown', down);
+      window.removeEventListener('keyup', up);
+    };
+  }, [pushToTalkStart, pushToTalkEnd]);
 
   const handleLeave = useCallback(() => router.push('/'), [router]);
 
@@ -246,6 +270,8 @@ export default function Room({ roomId, isHost }: RoomProps) {
           onStopScreenShare={stopScreenShare}
           onToggleChat={() => setIsChatOpen((o) => !o)}
           onMovieVolumeChange={handleMovieVolume}
+          onDuckStart={pushToTalkStart}
+          onDuckEnd={pushToTalkEnd}
           onLeave={handleLeave}
           reactionBar={
             <ReactionBar
