@@ -7,11 +7,24 @@ interface ChatSidebarProps {
   roomId: string;
   role: 'host' | 'guest';
   onClose: () => void;
+  onCommand?: (cmd: string) => void;
+  customMode?: boolean;
 }
 
-export default function ChatSidebar({ roomId, role, onClose }: ChatSidebarProps) {
+const COMMANDS: Record<string, string> = {
+  '/react_mr': 'Switched to custom reactions 🎉',
+};
+
+export default function ChatSidebar({
+  roomId,
+  role,
+  onClose,
+  onCommand,
+  customMode = false,
+}: ChatSidebarProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
+  const [localNotice, setLocalNotice] = useState('');
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -27,6 +40,22 @@ export default function ChatSidebar({ roomId, role, onClose }: ChatSidebarProps)
   const send = () => {
     const text = input.trim();
     if (!text) return;
+
+    // Intercept slash commands — don't send them as chat messages
+    if (text.startsWith('/')) {
+      const notice = COMMANDS[text];
+      if (notice) {
+        onCommand?.(text.slice(1)); // e.g. 'react_mr'
+        setLocalNotice(notice);
+        setTimeout(() => setLocalNotice(''), 3000);
+      } else {
+        setLocalNotice(`Unknown command: ${text}`);
+        setTimeout(() => setLocalNotice(''), 2000);
+      }
+      setInput('');
+      return;
+    }
+
     sendChatMessage(roomId, text, role).catch(console.error);
     setInput('');
   };
@@ -35,7 +64,14 @@ export default function ChatSidebar({ roomId, role, onClose }: ChatSidebarProps)
     <div className="flex flex-col h-full bg-zinc-900 border-l border-white/10 w-72 shrink-0">
       {/* header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
-        <span className="text-white font-medium text-sm">Chat</span>
+        <div className="flex items-center gap-2">
+          <span className="text-white font-medium text-sm">Chat</span>
+          {customMode && (
+            <span className="text-xs bg-indigo-600/60 text-indigo-200 px-2 py-0.5 rounded-full">
+              custom reactions on
+            </span>
+          )}
+        </div>
         <button
           onClick={onClose}
           className="text-white/40 hover:text-white transition-colors text-lg leading-none"
@@ -44,11 +80,19 @@ export default function ChatSidebar({ roomId, role, onClose }: ChatSidebarProps)
         </button>
       </div>
 
+      {/* local notice (command feedback) */}
+      {localNotice && (
+        <div className="mx-3 mt-2 px-3 py-1.5 bg-indigo-600/30 text-indigo-200 text-xs rounded-lg">
+          {localNotice}
+        </div>
+      )}
+
       {/* messages */}
       <div className="flex-1 overflow-y-auto px-3 py-2 space-y-2 text-sm">
-        {messages.length === 0 && (
+        {messages.length === 0 && !localNotice && (
           <p className="text-white/30 text-xs text-center mt-4">
-            No messages yet. Say hi! 👋
+            No messages yet. Say hi! 👋<br />
+            <span className="text-white/20">Tip: type /react_mr to unlock custom reactions</span>
           </p>
         )}
         {messages.map((m, i) => (
@@ -80,7 +124,7 @@ export default function ChatSidebar({ roomId, role, onClose }: ChatSidebarProps)
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && send()}
-          placeholder="Type a message…"
+          placeholder="/react_mr or type a message…"
           className="flex-1 bg-white/10 text-white placeholder-white/30 rounded-xl px-3 py-1.5 text-sm outline-none focus:ring-1 focus:ring-indigo-500"
         />
         <button

@@ -5,6 +5,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 interface FaceCamProps {
   stream: MediaStream | null;
   label: string;
+  mirrored?: boolean;
   position?: 'bottom-right' | 'bottom-left';
   isHost?: boolean;
 }
@@ -27,6 +28,7 @@ function getInitialPos(position: 'bottom-right' | 'bottom-left'): Pos {
 export default function FaceCam({
   stream,
   label,
+  mirrored = false,
   position = 'bottom-right',
   isHost = false,
 }: FaceCamProps) {
@@ -108,7 +110,7 @@ export default function FaceCam({
         autoPlay
         playsInline
         muted
-        className="w-full h-full object-cover"
+        className={`w-full h-full object-cover${mirrored ? ' scale-x-[-1]' : ''}`}
       />
 
       {/* label */}
