@@ -226,6 +226,12 @@ export default function Room({ roomId, isHost }: RoomProps) {
                 {copied ? '✅ Copied!' : '🔗 Copy invite link'}
               </button>
             )}
+            <button
+              onClick={handleLeave}
+              className="mt-4 px-4 py-2 rounded-xl bg-white/10 hover:bg-red-500/80 text-white/60 hover:text-white text-sm transition-colors"
+            >
+              Leave room
+            </button>
           </div>
         )}
 
