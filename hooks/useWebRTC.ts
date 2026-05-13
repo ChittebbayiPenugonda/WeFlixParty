@@ -7,7 +7,6 @@ import {
   onOffer,
   onAnswer,
   onGuestJoined,
-  signalGuestJoined,
   addIceCandidate,
   onIceCandidates,
   setScreenStreamId,
@@ -54,11 +53,17 @@ export function useWebRTC({
   const remoteDescSet = useRef(false);
   const makingOffer = useRef(false);
   const remoteScreenIdRef = useRef<string | null>(null);
-
-  // Track which offer/answer timestamps we've already processed to prevent
-  // Firestore snapshot re-fires from reprocessing the same SDP.
   const lastOfferTs = useRef(0);
   const lastAnswerTs = useRef(0);
+  // Persistent guards — survive effect re-runs caused by re-renders
+  const guestJoinedHandled = useRef(false);
+
+  // Store callbacks in refs so buildPC/signaling effect stay stable
+  // even when the parent re-renders with new inline arrow functions.
+  const onPeerConnectedRef = useRef(onPeerConnected);
+  const onPeerDisconnectedRef = useRef(onPeerDisconnected);
+  onPeerConnectedRef.current = onPeerConnected;
+  onPeerDisconnectedRef.current = onPeerDisconnected;
 
   const [state, setState] = useState<WebRTCState>({
     localStream: null,
@@ -85,6 +90,9 @@ export function useWebRTC({
   }
 
   // ── build peer connection ─────────────────────────────────────────────────
+  // Only depends on primitives (roomId, isHost) — stable across renders.
+  // Callbacks are accessed via refs so they're always current without
+  // making this function change on every render.
 
   const buildPC = useCallback((): RTCPeerConnection => {
     const conn = new RTCPeerConnection(ICE_CONFIG);
@@ -98,59 +106,71 @@ export function useWebRTC({
     conn.onconnectionstatechange = () => {
       console.log('[WebRTC] connectionState:', conn.connectionState);
       updateState({ connectionState: conn.connectionState });
-      if (conn.connectionState === 'connected') onPeerConnected?.();
-      if (conn.connectionState === 'disconnected' || conn.connectionState === 'failed') {
-        onPeerDisconnected?.();
+      if (conn.connectionState === 'connected') {
+        onPeerConnectedRef.current?.();
+      }
+      if (
+        conn.connectionState === 'disconnected' ||
+        conn.connectionState === 'failed'
+      ) {
+        onPeerDisconnectedRef.current?.();
       }
     };
 
     conn.oniceconnectionstatechange = () => {
       console.log('[WebRTC] iceConnectionState:', conn.iceConnectionState);
-      if (conn.iceConnectionState === 'connected' || conn.iceConnectionState === 'completed') {
-        onPeerConnected?.();
+      if (
+        conn.iceConnectionState === 'connected' ||
+        conn.iceConnectionState === 'completed'
+      ) {
+        onPeerConnectedRef.current?.();
       }
     };
 
     conn.ontrack = ({ track, streams }) => {
       const stream = streams[0];
       if (!stream) return;
-      console.log('[WebRTC] ontrack:', track.kind, 'streamId:', stream.id, 'remoteScreenId:', remoteScreenIdRef.current);
+      console.log('[WebRTC] ontrack:', track.kind, 'streamId:', stream.id);
 
       if (stream.id === remoteScreenIdRef.current) {
-        setState((prev) => {
-          if (prev.remoteScreenStream?.id === stream.id) return prev;
-          return { ...prev, remoteScreenStream: stream };
-        });
+        setState((prev) =>
+          prev.remoteScreenStream?.id === stream.id
+            ? prev
+            : { ...prev, remoteScreenStream: stream },
+        );
       } else {
-        setState((prev) => {
-          if (prev.remoteStream?.id === stream.id) return prev;
-          return { ...prev, remoteStream: stream };
-        });
+        setState((prev) =>
+          prev.remoteStream?.id === stream.id
+            ? prev
+            : { ...prev, remoteStream: stream },
+        );
       }
     };
 
-    // onnegotiationneeded only runs after initial connection for renegotiation
-    // (screen share add/remove). The initial offer is triggered by guestJoined.
+    // Only fires for renegotiation (screen share) — initial offer is
+    // triggered explicitly via createInitialOffer after guestJoined.
     conn.onnegotiationneeded = async () => {
       if (!isHost) return;
-      if (!remoteDescSet.current) return; // not yet connected; initial offer handled separately
+      if (!remoteDescSet.current) return; // not yet connected, skip
       if (makingOffer.current) return;
-      console.log('[WebRTC] renegotiation needed');
+      console.log('[WebRTC] renegotiation triggered');
       try {
         makingOffer.current = true;
         const offer = await conn.createOffer();
         if (conn.signalingState !== 'stable') return;
         await conn.setLocalDescription(offer);
-        await writeOffer(roomId, conn.localDescription!);
+        // Pass `offer` (plain RTCSessionDescriptionInit) not conn.localDescription
+        // (RTCSessionDescription) — its type/sdp are prototype getters that don't spread.
+        await writeOffer(roomId, { type: offer.type, sdp: offer.sdp! });
       } catch (e) {
-        console.error('[WebRTC] renegotiation offer failed:', e);
+        console.error('[WebRTC] renegotiation failed:', e);
       } finally {
         makingOffer.current = false;
       }
     };
 
     return conn;
-  }, [roomId, isHost, onPeerConnected, onPeerDisconnected]);
+  }, [roomId, isHost]); // ← stable: only primitive deps
 
   // ── start webcam ──────────────────────────────────────────────────────────
 
@@ -165,7 +185,7 @@ export function useWebRTC({
 
       if (!pc.current) pc.current = buildPC();
       stream.getTracks().forEach((t) => pc.current!.addTrack(t, stream));
-      console.log('[WebRTC] webcam started, tracks added');
+      console.log('[WebRTC] webcam ready, tracks added to PC');
       return stream;
     } catch (err) {
       console.error('[WebRTC] getUserMedia failed:', err);
@@ -228,18 +248,19 @@ export function useWebRTC({
     updateState({ isCamOn: tracks[0]?.enabled ?? false });
   }, []);
 
-  // ── create initial offer (host only, called after guest joins) ─────────────
+  // ── create initial offer (host, called once after guestJoined) ────────────
 
   const createInitialOffer = useCallback(async () => {
-    if (!isHost || !pc.current) return;
-    if (makingOffer.current) return;
-    console.log('[WebRTC] creating initial offer');
+    if (!isHost || !pc.current || makingOffer.current) return;
+    console.log('[WebRTC] creating initial offer...');
     try {
       makingOffer.current = true;
       const offer = await pc.current.createOffer();
       await pc.current.setLocalDescription(offer);
-      await writeOffer(roomId, pc.current.localDescription!);
-      console.log('[WebRTC] initial offer written to Firestore');
+      // Pass the plain RTCSessionDescriptionInit, not pc.current.localDescription —
+      // RTCSessionDescription.type/sdp are prototype getters and won't spread.
+      await writeOffer(roomId, { type: offer.type, sdp: offer.sdp! });
+      console.log('[WebRTC] initial offer written');
     } catch (e) {
       console.error('[WebRTC] createInitialOffer failed:', e);
     } finally {
@@ -247,7 +268,7 @@ export function useWebRTC({
     }
   }, [roomId, isHost]);
 
-  // ── signaling listeners ───────────────────────────────────────────────────
+  // ── signaling listeners — run once on mount ───────────────────────────────
 
   useEffect(() => {
     if (!roomId) return;
@@ -261,19 +282,21 @@ export function useWebRTC({
     );
 
     if (isHost) {
-      // Host waits for guest to signal presence, then creates the initial offer
       unsubs.push(
         onGuestJoined(roomId, () => {
-          console.log('[WebRTC] guest joined, creating offer');
+          // guestJoinedHandled is a ref — persists across effect re-runs
+          // so we never create more than one initial offer.
+          if (guestJoinedHandled.current) return;
+          guestJoinedHandled.current = true;
+          console.log('[WebRTC] guest joined → creating offer');
           createInitialOffer();
         }),
       );
 
-      // Host receives guest's answer
       unsubs.push(
         onAnswer(roomId, async (answer: TimestampedSDP) => {
           if (!pc.current) return;
-          if (answer.ts <= lastAnswerTs.current) return; // already processed
+          if (answer.ts <= lastAnswerTs.current) return;
           if (pc.current.signalingState !== 'have-local-offer') return;
           lastAnswerTs.current = answer.ts;
           console.log('[WebRTC] host received answer, applying...');
@@ -281,66 +304,63 @@ export function useWebRTC({
             await pc.current.setRemoteDescription(new RTCSessionDescription(answer));
             remoteDescSet.current = true;
             await drainPendingCandidates();
-            console.log('[WebRTC] remote description set (answer)');
+            console.log('[WebRTC] answer applied ✓');
           } catch (e) {
             console.error('[WebRTC] setRemoteDescription(answer) failed:', e);
           }
         }),
       );
 
-      // Host collects guest's ICE candidates
       unsubs.push(
         onIceCandidates(roomId, 'answerCandidates', async (candidate) => {
           if (!pc.current) return;
           if (!remoteDescSet.current) {
             pendingCandidates.current.push(candidate);
           } else {
-            try {
-              await pc.current.addIceCandidate(new RTCIceCandidate(candidate));
-            } catch (_) { /* ignore */ }
+            try { await pc.current.addIceCandidate(new RTCIceCandidate(candidate)); }
+            catch (_) { /* ignore */ }
           }
         }),
       );
     } else {
-      // Guest receives host's offer
       unsubs.push(
         onOffer(roomId, async (offer: TimestampedSDP) => {
           if (!pc.current) return;
-          if (offer.ts <= lastOfferTs.current) return; // already processed
+          if (offer.ts <= lastOfferTs.current) return;
           lastOfferTs.current = offer.ts;
           console.log('[WebRTC] guest received offer, processing...');
           try {
             await pc.current.setRemoteDescription(new RTCSessionDescription(offer));
             remoteDescSet.current = true;
             await drainPendingCandidates();
-
             const answer = await pc.current.createAnswer();
             await pc.current.setLocalDescription(answer);
-            await writeAnswer(roomId, answer);
-            console.log('[WebRTC] answer written to Firestore');
+            await writeAnswer(roomId, { type: answer.type, sdp: answer.sdp! });
+            console.log('[WebRTC] answer written ✓');
           } catch (e) {
             console.error('[WebRTC] offer handling failed:', e);
           }
         }),
       );
 
-      // Guest collects host's ICE candidates
       unsubs.push(
         onIceCandidates(roomId, 'offerCandidates', async (candidate) => {
           if (!pc.current) return;
           if (!remoteDescSet.current) {
             pendingCandidates.current.push(candidate);
           } else {
-            try {
-              await pc.current.addIceCandidate(new RTCIceCandidate(candidate));
-            } catch (_) { /* ignore */ }
+            try { await pc.current.addIceCandidate(new RTCIceCandidate(candidate)); }
+            catch (_) { /* ignore */ }
           }
         }),
       );
     }
 
     return () => unsubs.forEach((u) => u());
-  }, [roomId, isHost, buildPC, createInitialOffer]);
+  // buildPC and createInitialOffer are stable (only primitive deps).
+  // roomId and isHost won't change for a mounted room.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roomId, isHost]);
 
   // ── cleanup ───────────────────────────────────────────────────────────────
 
