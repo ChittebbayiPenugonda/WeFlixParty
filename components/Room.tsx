@@ -27,6 +27,7 @@ export default function Room({ roomId, isHost }: RoomProps) {
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [movieVolume, setMovieVolume] = useState(1);
   const [customReactions, setCustomReactions] = useState(false);
+  const [isManualDucking, setIsManualDucking] = useState(false);
   const [peerLabel] = useState(isHost ? 'Guest' : 'Host');
   const remoteVoiceAudioRef = useRef<HTMLAudioElement>(null);
   const role: 'host' | 'guest' = isHost ? 'host' : 'guest';
@@ -133,6 +134,18 @@ export default function Room({ roomId, isHost }: RoomProps) {
     [setDuckGain],
   );
 
+  // ── push-to-talk helpers (shared by button + spacebar) ───────────────────
+
+  const handleDuckStart = useCallback(() => {
+    setIsManualDucking(true);
+    pushToTalkStart();
+  }, [pushToTalkStart]);
+
+  const handleDuckEnd = useCallback(() => {
+    setIsManualDucking(false);
+    pushToTalkEnd();
+  }, [pushToTalkEnd]);
+
   // ── spacebar push-to-talk (skip when typing in chat input) ───────────────
 
   useEffect(() => {
@@ -141,11 +154,11 @@ export default function Room({ roomId, isHost }: RoomProps) {
       const tag = (e.target as HTMLElement).tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
       e.preventDefault();
-      pushToTalkStart();
+      handleDuckStart();
     };
     const up = (e: KeyboardEvent) => {
       if (e.code !== 'Space') return;
-      pushToTalkEnd();
+      handleDuckEnd();
     };
     window.addEventListener('keydown', down);
     window.addEventListener('keyup', up);
@@ -153,7 +166,7 @@ export default function Room({ roomId, isHost }: RoomProps) {
       window.removeEventListener('keydown', down);
       window.removeEventListener('keyup', up);
     };
-  }, [pushToTalkStart, pushToTalkEnd]);
+  }, [handleDuckStart, handleDuckEnd]);
 
   const handleLeave = useCallback(() => router.push('/'), [router]);
 
@@ -270,8 +283,9 @@ export default function Room({ roomId, isHost }: RoomProps) {
           onStopScreenShare={stopScreenShare}
           onToggleChat={() => setIsChatOpen((o) => !o)}
           onMovieVolumeChange={handleMovieVolume}
-          onDuckStart={pushToTalkStart}
-          onDuckEnd={pushToTalkEnd}
+          isManualDucking={isManualDucking}
+          onDuckStart={handleDuckStart}
+          onDuckEnd={handleDuckEnd}
           onLeave={handleLeave}
           reactionBar={
             <ReactionBar

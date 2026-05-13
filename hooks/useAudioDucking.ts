@@ -2,7 +2,7 @@
 
 import { useRef, useCallback, useEffect } from 'react';
 
-const DUCK_GAIN = 0.15;       // volume when someone is speaking
+const DUCK_GAIN = 0.03;       // volume when ducked — near-silent so voice is crystal clear
 const DUCK_RAMP_MS = 100;     // fade down time
 const RESTORE_RAMP_MS = 400;  // fade back up time
 const VAD_THRESHOLD = 0.02;   // RMS threshold for voice detection

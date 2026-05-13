@@ -15,6 +15,7 @@ interface ControlsProps {
   onToggleChat: () => void;
   onMovieVolumeChange: (v: number) => void;
   onLeave: () => void;
+  isManualDucking: boolean;
   onDuckStart: () => void;
   onDuckEnd: () => void;
   reactionBar: React.ReactNode;
@@ -33,27 +34,17 @@ export default function Controls({
   onToggleChat,
   onMovieVolumeChange,
   onLeave,
+  isManualDucking,
   onDuckStart,
   onDuckEnd,
   reactionBar,
 }: ControlsProps) {
   const [showVolume, setShowVolume] = useState(false);
-  const [ducking, setDucking] = useState(false);
 
   const handleScreenShare = useCallback(() => {
     if (isScreenSharing) onStopScreenShare();
     else onStartScreenShare();
   }, [isScreenSharing, onStartScreenShare, onStopScreenShare]);
-
-  const startDuck = useCallback(() => {
-    setDucking(true);
-    onDuckStart();
-  }, [onDuckStart]);
-
-  const endDuck = useCallback(() => {
-    setDucking(false);
-    onDuckEnd();
-  }, [onDuckEnd]);
 
   return (
     <div className="absolute bottom-0 left-0 right-0 z-10 flex flex-col items-center gap-2 pb-3 pt-8 bg-gradient-to-t from-black/80 to-transparent">
@@ -96,20 +87,20 @@ export default function Controls({
           </span>
         </button>
 
-        {/* push-to-talk / duck movie — hold to talk clearly (also spacebar) */}
+        {/* push-to-talk — button or spacebar, both reflected by isManualDucking */}
         <button
-          onPointerDown={startDuck}
-          onPointerUp={endDuck}
-          onPointerLeave={endDuck}
-          className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-medium select-none transition-colors ${
-            ducking
-              ? 'bg-green-500 text-white scale-95'
+          onPointerDown={onDuckStart}
+          onPointerUp={onDuckEnd}
+          onPointerLeave={onDuckEnd}
+          className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-medium select-none transition-all ${
+            isManualDucking
+              ? 'bg-green-500 text-white scale-95 shadow-lg shadow-green-500/30'
               : 'bg-white/10 text-white hover:bg-white/20'
           }`}
           title="Hold to talk clearly (ducks movie audio) — or hold Space"
         >
-          <span>🔈</span>
-          <span className="hidden sm:inline">{ducking ? 'Talking…' : 'Hold to talk'}</span>
+          <span>{isManualDucking ? '🎙️' : '🔈'}</span>
+          <span className="hidden sm:inline">{isManualDucking ? 'Talking…' : 'Hold to talk'}</span>
         </button>
 
         {/* movie volume */}
