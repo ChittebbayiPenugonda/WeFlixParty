@@ -2,29 +2,21 @@
 
 import { useRef, useCallback, useEffect } from 'react';
 
-// VAD auto-duck: just enough to make remote voice clearly audible
-const VAD_DUCK_GAIN    = 0.06;
-// Manual override (spacebar / button): near-silent so you can speak freely
-const MANUAL_DUCK_GAIN = 0.01;
-
-const DUCK_RAMP_MS    = 80;   // fade down
-const RESTORE_RAMP_MS = 400;  // fade back up
-const VAD_THRESHOLD   = 0.018;
-const SILENCE_HOLD_MS = 700;
+const VAD_DUCK_GAIN    = 0.06;   // auto-duck when remote speaks
+const MANUAL_DUCK_GAIN = 0.01;   // spacebar override — near-silent
+const VAD_RAMP_MS      = 80;
+const VAD_RESTORE_MS   = 400;
+const VAD_THRESHOLD    = 0.018;
+const SILENCE_HOLD_MS  = 700;
 
 export function useAudioDucking() {
-  const ctx         = useRef<AudioContext | null>(null);
-  const movieGain   = useRef<GainNode | null>(null);
-  const analyser    = useRef<AnalyserNode | null>(null);
-  const vadSource   = useRef<MediaStreamAudioSourceNode | null>(null);
-  const rafId       = useRef<number>(0);
-  const silenceTimer= useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // Two independent ducking flags — both can be active at once.
-  // We always apply the lower (quieter) of the two targets.
-  const vadActive    = useRef(false);
-  const manualActive = useRef(false);
-
+  const ctx        = useRef<AudioContext | null>(null);
+  const movieGain  = useRef<GainNode | null>(null);
+  const vadSource  = useRef<MediaStreamAudioSourceNode | null>(null);
+  const rafId      = useRef<number>(0);
+  const silenceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const vadActive  = useRef(false);
+  const manualOn   = useRef(false);
   const movieSources = useRef<Map<string, MediaStreamAudioSourceNode>>(new Map());
 
   function getCtx(): AudioContext {
@@ -35,26 +27,7 @@ export function useAudioDucking() {
     return ctx.current;
   }
 
-  // ── apply the right gain based on which flags are set ────────────────────
-
-  function applyGain() {
-    const gain    = movieGain.current;
-    const audioCtx = ctx.current;
-    if (!gain || !audioCtx) return;
-
-    const target = manualActive.current
-      ? MANUAL_DUCK_GAIN
-      : vadActive.current
-        ? VAD_DUCK_GAIN
-        : 1;
-
-    const rampMs = target < (gain.gain.value ?? 1) ? DUCK_RAMP_MS : RESTORE_RAMP_MS;
-    gain.gain.cancelScheduledValues(audioCtx.currentTime);
-    gain.gain.setValueAtTime(gain.gain.value, audioCtx.currentTime);
-    gain.gain.linearRampToValueAtTime(target, audioCtx.currentTime + rampMs / 1000);
-  }
-
-  // ── connect movie/screen-share audio through the gain node ───────────────
+  // ── connect screen-share / movie audio through the duck gain node ─────────
 
   const connectMovieAudio = useCallback((stream: MediaStream) => {
     if (!stream.getAudioTracks().length) return;
@@ -68,31 +41,30 @@ export function useAudioDucking() {
     }
 
     if (movieSources.current.has(stream.id)) return;
-    const source = audioCtx.createMediaStreamSource(stream);
-    source.connect(movieGain.current);
-    movieSources.current.set(stream.id, source);
+    const src = audioCtx.createMediaStreamSource(stream);
+    src.connect(movieGain.current);
+    movieSources.current.set(stream.id, src);
   }, []);
 
   const disconnectMovieAudio = useCallback((stream: MediaStream) => {
-    const source = movieSources.current.get(stream.id);
-    if (!source) return;
-    source.disconnect();
+    const src = movieSources.current.get(stream.id);
+    if (!src) return;
+    src.disconnect();
     movieSources.current.delete(stream.id);
   }, []);
 
-  // ── VAD on the remote stream (auto-duck when they speak) ─────────────────
+  // ── VAD: auto-duck when remote person speaks ──────────────────────────────
 
   const startVAD = useCallback((remoteStream: MediaStream) => {
-    const audioCtx = getCtx();
-
+    cancelAnimationFrame(rafId.current);
     vadSource.current?.disconnect();
-    vadSource.current = audioCtx.createMediaStreamSource(remoteStream);
 
+    const audioCtx = getCtx();
+    vadSource.current = audioCtx.createMediaStreamSource(remoteStream);
     const an = audioCtx.createAnalyser();
     an.fftSize = 512;
-    analyser.current = an;
     vadSource.current.connect(an);
-    // NOT connected to destination — analysis only, no double-playback
+    // NOT to destination — analysis only
 
     const buf = new Float32Array(an.fftSize);
 
@@ -103,51 +75,80 @@ export function useAudioDucking() {
       if (rms > VAD_THRESHOLD) {
         if (!vadActive.current) {
           vadActive.current = true;
-          applyGain();
+          vadDuck();
         }
-        if (silenceTimer.current) clearTimeout(silenceTimer.current);
-        silenceTimer.current = setTimeout(() => {
+        if (silenceRef.current) clearTimeout(silenceRef.current);
+        silenceRef.current = setTimeout(() => {
           vadActive.current = false;
-          applyGain(); // restore (or stay at manual level if spacebar held)
+          vadRestore();
         }, SILENCE_HOLD_MS);
       }
 
       rafId.current = requestAnimationFrame(tick);
     }
-
-    cancelAnimationFrame(rafId.current);
     rafId.current = requestAnimationFrame(tick);
   }, []);
 
   const stopVAD = useCallback(() => {
     cancelAnimationFrame(rafId.current);
-    if (silenceTimer.current) clearTimeout(silenceTimer.current);
+    if (silenceRef.current) clearTimeout(silenceRef.current);
     vadSource.current?.disconnect();
     vadSource.current = null;
     vadActive.current = false;
-    applyGain();
+    vadRestore();
   }, []);
 
-  // ── manual push-to-talk (spacebar / button) ───────────────────────────────
+  // VAD transitions — only apply if manual override isn't active
+  function vadDuck() {
+    if (manualOn.current) return; // manual already has it quieter, don't interfere
+    const g = movieGain.current; const ac = ctx.current;
+    if (!g || !ac) return;
+    g.gain.cancelScheduledValues(ac.currentTime);
+    g.gain.setValueAtTime(g.gain.value, ac.currentTime);
+    g.gain.linearRampToValueAtTime(VAD_DUCK_GAIN, ac.currentTime + VAD_RAMP_MS / 1000);
+  }
+
+  function vadRestore() {
+    if (manualOn.current) return; // leave gain alone while spacebar is held
+    const g = movieGain.current; const ac = ctx.current;
+    if (!g || !ac) return;
+    g.gain.cancelScheduledValues(ac.currentTime);
+    g.gain.setValueAtTime(g.gain.value, ac.currentTime);
+    g.gain.linearRampToValueAtTime(1, ac.currentTime + VAD_RESTORE_MS / 1000);
+  }
+
+  // ── Manual override (spacebar / button) — completely independent of VAD ───
+  // Pressing space snaps the gain to near-zero immediately, full stop.
+  // Releasing space restores — to VAD duck level if VAD is active, else 1.0.
 
   const pushToTalkStart = useCallback(() => {
-    manualActive.current = true;
-    applyGain(); // immediately go to MANUAL_DUCK_GAIN (quieter than VAD level)
+    manualOn.current = true;
+    const g = movieGain.current;
+    const ac = getCtx();
+    if (!g) return;
+    // Instant snap — no ramp, no interaction with VAD
+    g.gain.cancelScheduledValues(ac.currentTime);
+    g.gain.setValueAtTime(MANUAL_DUCK_GAIN, ac.currentTime);
   }, []);
 
   const pushToTalkEnd = useCallback(() => {
-    manualActive.current = false;
-    applyGain(); // restore to VAD level (if still speaking) or 1.0
+    manualOn.current = false;
+    const g = movieGain.current; const ac = ctx.current;
+    if (!g || !ac) return;
+    // Restore to appropriate level
+    const target = vadActive.current ? VAD_DUCK_GAIN : 1;
+    g.gain.cancelScheduledValues(ac.currentTime);
+    g.gain.setValueAtTime(g.gain.value, ac.currentTime);
+    g.gain.linearRampToValueAtTime(target, ac.currentTime + VAD_RESTORE_MS / 1000);
   }, []);
 
   // ── volume slider ─────────────────────────────────────────────────────────
 
   const setMovieVolume = useCallback((vol: number) => {
-    const gain    = movieGain.current;
-    const audioCtx = ctx.current;
-    if (!gain || !audioCtx) return;
-    gain.gain.cancelScheduledValues(audioCtx.currentTime);
-    gain.gain.setValueAtTime(vol, audioCtx.currentTime);
+    const g = movieGain.current; const ac = ctx.current;
+    if (!g || !ac) return;
+    g.gain.cancelScheduledValues(ac.currentTime);
+    g.gain.setValueAtTime(vol, ac.currentTime);
   }, []);
 
   // ── cleanup ───────────────────────────────────────────────────────────────
@@ -155,7 +156,7 @@ export function useAudioDucking() {
   useEffect(() => {
     return () => {
       cancelAnimationFrame(rafId.current);
-      if (silenceTimer.current) clearTimeout(silenceTimer.current);
+      if (silenceRef.current) clearTimeout(silenceRef.current);
       ctx.current?.close();
     };
   }, []);
