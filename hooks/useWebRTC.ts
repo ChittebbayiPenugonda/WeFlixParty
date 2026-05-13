@@ -32,6 +32,7 @@ interface UseWebRTCOptions {
 
 export interface WebRTCState {
   localStream: MediaStream | null;
+  localScreenStream: MediaStream | null;
   remoteStream: MediaStream | null;
   remoteScreenStream: MediaStream | null;
   isScreenSharing: boolean;
@@ -67,6 +68,7 @@ export function useWebRTC({
 
   const [state, setState] = useState<WebRTCState>({
     localStream: null,
+    localScreenStream: null,
     remoteStream: null,
     remoteScreenStream: null,
     isScreenSharing: false,
@@ -210,7 +212,7 @@ export function useWebRTC({
       stream.getTracks().forEach((t) => pc.current!.addTrack(t, stream));
       console.log('[WebRTC] screen share started, streamId:', stream.id);
 
-      updateState({ isScreenSharing: true });
+      updateState({ isScreenSharing: true, localScreenStream: stream });
       stream.getVideoTracks()[0].onended = () => stopScreenShare();
       return stream;
     } catch (err) {
@@ -231,7 +233,7 @@ export function useWebRTC({
     screenStreamRef.current = null;
     const role = isHost ? 'hostScreenStreamId' : 'guestScreenStreamId';
     await setScreenStreamId(roomId, role, null);
-    updateState({ isScreenSharing: false, remoteScreenStream: null });
+    updateState({ isScreenSharing: false, localScreenStream: null, remoteScreenStream: null });
   }, [roomId, isHost]);
 
   // ── mic / cam toggles ─────────────────────────────────────────────────────

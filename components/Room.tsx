@@ -25,6 +25,10 @@ export default function Room({ roomId, isHost }: RoomProps) {
   const [movieVolume, setMovieVolume] = useState(1);
   const [peerLabel] = useState(isHost ? 'Guest' : 'Host');
   const remoteScreenVideoRef = useRef<HTMLVideoElement>(null);
+  const localScreenVideoRef = useRef<HTMLVideoElement>(null);
+  // Dedicated <audio> element for remote webcam voice — more reliable autoplay than
+  // playing audio through the <video> element in FaceCam.
+  const remoteVoiceAudioRef = useRef<HTMLAudioElement>(null);
   const role: 'host' | 'guest' = isHost ? 'host' : 'guest';
 
   const {
@@ -37,6 +41,7 @@ export default function Room({ roomId, isHost }: RoomProps) {
 
   const {
     localStream,
+    localScreenStream,
     remoteStream,
     remoteScreenStream,
     isScreenSharing,
@@ -50,8 +55,8 @@ export default function Room({ roomId, isHost }: RoomProps) {
   } = useWebRTC({
     roomId,
     isHost,
-    onPeerConnected: () => setStep('connected'),
-    onPeerDisconnected: () => setStep('waiting'),
+    onPeerConnected: useCallback(() => setStep('connected'), []),
+    onPeerDisconnected: useCallback(() => setStep('waiting'), []),
   });
 
   // ── boot sequence ──────────────────────────────────────────────────────────
@@ -73,11 +78,8 @@ export default function Room({ roomId, isHost }: RoomProps) {
         if (stream) startVAD(stream);
 
         if (isHost) {
-          // Host waits. The signaling listener in useWebRTC fires the offer
-          // automatically once the guest signals their presence via Firestore.
           setStep('waiting');
         } else {
-          // Guest signals presence — this triggers the host to create the offer.
           await signalGuestJoined(roomId);
           setStep('waiting');
         }
@@ -87,45 +89,55 @@ export default function Room({ roomId, isHost }: RoomProps) {
       }
     }
     init();
-
-    return () => {
-      stopVAD();
-    };
+    return () => stopVAD();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── route remote screen stream audio through ducking ──────────────────────
+  // ── remote voice audio — dedicated <audio> element bypasses FaceCam ──────
 
   useEffect(() => {
-    if (remoteScreenStream) {
-      connectMovieAudio(remoteScreenStream);
-    }
-    return () => {
-      if (remoteScreenStream) disconnectMovieAudio(remoteScreenStream);
-    };
+    const audio = remoteVoiceAudioRef.current;
+    if (!audio || !remoteStream) return;
+    audio.srcObject = remoteStream;
+    audio.play().catch((e) => console.warn('[Room] remote voice play blocked:', e));
+  }, [remoteStream]);
+
+  // ── remote screen share: audio through ducking, video through <video> ─────
+
+  useEffect(() => {
+    if (remoteScreenStream) connectMovieAudio(remoteScreenStream);
+    return () => { if (remoteScreenStream) disconnectMovieAudio(remoteScreenStream); };
   }, [remoteScreenStream, connectMovieAudio, disconnectMovieAudio]);
 
-  // ── attach remote screen stream to video element ──────────────────────────
-
   useEffect(() => {
-    if (remoteScreenVideoRef.current && remoteScreenStream) {
-      remoteScreenVideoRef.current.srcObject = remoteScreenStream;
+    const v = remoteScreenVideoRef.current;
+    if (v && remoteScreenStream) {
+      v.srcObject = remoteScreenStream;
+      v.play().catch(() => undefined);
     }
   }, [remoteScreenStream]);
 
-  // ── movie volume slider ────────────────────────────────────────────────────
+  // ── local screen share preview ────────────────────────────────────────────
+
+  useEffect(() => {
+    const v = localScreenVideoRef.current;
+    if (v && localScreenStream) {
+      v.srcObject = localScreenStream;
+      v.play().catch(() => undefined);
+    }
+  }, [localScreenStream]);
+
+  // ── movie volume slider ───────────────────────────────────────────────────
 
   const handleMovieVolume = useCallback(
     (v: number) => {
       setMovieVolume(v);
       setDuckGain(v);
     },
-    [setMovieVolume, setDuckGain],
+    [setDuckGain],
   );
 
-  const handleLeave = useCallback(() => {
-    router.push('/');
-  }, [router]);
+  const handleLeave = useCallback(() => router.push('/'), [router]);
 
   // ── copy link ─────────────────────────────────────────────────────────────
 
@@ -138,7 +150,7 @@ export default function Room({ roomId, isHost }: RoomProps) {
     setTimeout(() => setCopied(false), 2000);
   }, [roomId]);
 
-  // ── render ─────────────────────────────────────────────────────────────────
+  // ── render ────────────────────────────────────────────────────────────────
 
   if (step === 'error') {
     return (
@@ -154,8 +166,6 @@ export default function Room({ roomId, isHost }: RoomProps) {
     );
   }
 
-  const showScreenShare = !!(remoteScreenStream || isScreenSharing);
-
   return (
     <div className="flex h-full">
       {/* ── main content ── */}
@@ -163,7 +173,7 @@ export default function Room({ roomId, isHost }: RoomProps) {
 
         {/* ── main video area ── */}
         {remoteScreenStream ? (
-          // Remote screen share — mute the video element; audio routes through ducking node
+          // Remote peer is sharing — show their screen (audio routed through AudioContext)
           <video
             ref={remoteScreenVideoRef}
             autoPlay
@@ -171,23 +181,29 @@ export default function Room({ roomId, isHost }: RoomProps) {
             muted
             className="w-full h-full object-contain"
           />
-        ) : isScreenSharing ? (
-          // We're sharing — show a local preview placeholder
-          <div className="flex items-center justify-center w-full h-full text-white/40 flex-col gap-3">
-            <div className="text-5xl">🖥️</div>
-            <p className="text-sm">You are sharing your screen</p>
-            <p className="text-xs text-white/30">Your peer sees your screen</p>
-          </div>
+        ) : localScreenStream ? (
+          // We are sharing — show our own screen as a preview
+          <video
+            ref={localScreenVideoRef}
+            autoPlay
+            playsInline
+            muted
+            className="w-full h-full object-contain"
+          />
         ) : (
-          // No screen share — show local video player
+          // No screen share active — local video file player
           <div className="flex items-center justify-center w-full h-full">
-            {/* VideoPlayer only shown when no active screen share */}
             <VideoPlayer
               roomId={roomId}
-              onAudioStream={(s) => {
-                if (s) connectMovieAudio(s);
-              }}
+              onAudioStream={(s) => { if (s) connectMovieAudio(s); }}
             />
+          </div>
+        )}
+
+        {/* Sharing indicator badge */}
+        {localScreenStream && !remoteScreenStream && (
+          <div className="absolute top-12 left-1/2 -translate-x-1/2 bg-indigo-600/80 text-white text-xs px-3 py-1 rounded-full z-10">
+            🖥️ You are sharing — your friend sees this
           </div>
         )}
 
@@ -209,21 +225,24 @@ export default function Room({ roomId, isHost }: RoomProps) {
           </div>
         )}
 
-        {/* ── face cams ── */}
+        {/* ── face cams — video only, audio handled by <audio> below ── */}
         <FaceCam
           stream={localStream}
           label="You"
-          muted
           position={isHost ? 'bottom-right' : 'bottom-left'}
           isHost={isHost}
         />
         <FaceCam
           stream={remoteStream}
           label={peerLabel}
-          muted={false}
           position={isHost ? 'bottom-left' : 'bottom-right'}
           isHost={!isHost}
         />
+
+        {/* Dedicated audio element for remote voice — avoids autoplay restrictions
+            that affect <video> elements with audio. Always unmuted. */}
+        {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+        <audio ref={remoteVoiceAudioRef} autoPlay playsInline className="hidden" />
 
         {/* ── controls bar ── */}
         <Controls
