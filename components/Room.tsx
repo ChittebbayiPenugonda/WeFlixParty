@@ -93,8 +93,7 @@ export default function Room({ roomId, isHost }: RoomProps) {
           if (!exists) { setStep('error'); return; }
           await setPresence(roomId, 'guest', true);
         }
-        const stream = await startWebcam();
-        if (stream) startVAD(stream);
+        await startWebcam();
         if (isHost) {
           setStep('waiting');
         } else {
@@ -107,7 +106,7 @@ export default function Room({ roomId, isHost }: RoomProps) {
       }
     }
     init();
-    return () => stopVAD();
+    return () => {};
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -119,6 +118,14 @@ export default function Room({ roomId, isHost }: RoomProps) {
     audio.srcObject = remoteStream;
     audio.play().catch((e) => console.warn('[Room] remote voice play blocked:', e));
   }, [remoteStream]);
+
+  // ── VAD on remote stream — duck local movie when THEY are speaking ─────────
+
+  useEffect(() => {
+    if (!remoteStream) return;
+    startVAD(remoteStream);
+    return () => stopVAD();
+  }, [remoteStream, startVAD, stopVAD]);
 
   // ── remote screen share audio → ducking node ──────────────────────────────
 
