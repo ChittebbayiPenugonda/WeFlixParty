@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import { createRoom, roomExists, signalGuestJoined } from '@/lib/signaling';
+import { createRoom, roomExists, signalGuestJoined, setPresence, pruneRoomIfEmpty } from '@/lib/signaling';
 import { useWebRTC } from '@/hooks/useWebRTC';
 import { useAudioDucking } from '@/hooks/useAudioDucking';
 import FaceCam from './FaceCam';
@@ -59,16 +59,36 @@ export default function Room({ roomId, isHost }: RoomProps) {
     onPeerDisconnected: useCallback(() => setStep('waiting'), []),
   });
 
+  // ── presence cleanup — runs when component unmounts or tab closes ──────────
+
+  useEffect(() => {
+    const cleanup = () => {
+      // Mark this peer offline then prune the room if both are gone.
+      // Fire-and-forget — we can't reliably await on tab close.
+      setPresence(roomId, role, false)
+        .then(() => pruneRoomIfEmpty(roomId))
+        .catch(console.error);
+    };
+
+    window.addEventListener('beforeunload', cleanup);
+    return () => {
+      window.removeEventListener('beforeunload', cleanup);
+      cleanup();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roomId, role]);
+
   // ── boot sequence ──────────────────────────────────────────────────────────
 
   useEffect(() => {
     async function init() {
       try {
         if (isHost) {
-          await createRoom(roomId);
+          await createRoom(roomId); // sets hostOnline: true inside createRoom
         } else {
           const exists = await roomExists(roomId);
           if (!exists) { setStep('error'); return; }
+          await setPresence(roomId, 'guest', true);
         }
         const stream = await startWebcam();
         if (stream) startVAD(stream);

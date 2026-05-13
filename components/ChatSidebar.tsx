@@ -91,8 +91,7 @@ export default function ChatSidebar({
       <div className="flex-1 overflow-y-auto px-3 py-2 space-y-2 text-sm">
         {messages.length === 0 && !localNotice && (
           <p className="text-white/30 text-xs text-center mt-4">
-            No messages yet. Say hi! 👋<br />
-            <span className="text-white/20">Tip: type /react_mr to unlock custom reactions</span>
+            No messages yet. Say hi! 👋
           </p>
         )}
         {messages.map((m, i) => (
@@ -124,7 +123,7 @@ export default function ChatSidebar({
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && send()}
-          placeholder="/react_mr or type a message…"
+          placeholder="Type a message…"
           className="flex-1 bg-white/10 text-white placeholder-white/30 rounded-xl px-3 py-1.5 text-sm outline-none focus:ring-1 focus:ring-indigo-500"
         />
         <button

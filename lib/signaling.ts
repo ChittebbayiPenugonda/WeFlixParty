@@ -20,10 +20,13 @@ import {
   doc,
   setDoc,
   getDoc,
+  getDocs,
   updateDoc,
+  deleteDoc,
   addDoc,
   onSnapshot,
   serverTimestamp,
+  Timestamp,
   query,
   orderBy,
   Unsubscribe,
@@ -52,16 +55,57 @@ export interface Reaction {
 
 // ─── Room lifecycle ────────────────────────────────────────────────────────
 
+// Rooms expire after 8 hours via Firestore TTL policy on the `expireAt` field.
+// To enable: Firebase Console → Firestore → Indexes → TTL policies → add field
+// path "expireAt" on collection "rooms".
 export async function createRoom(roomId: string): Promise<void> {
+  const expireAt = Timestamp.fromDate(new Date(Date.now() + 8 * 60 * 60 * 1000));
   await setDoc(doc(db, 'rooms', roomId), {
     createdAt: serverTimestamp(),
+    expireAt,
     offer: null,
     answer: null,
     guestJoined: false,
+    hostOnline: true,
+    guestOnline: false,
     hostScreenStreamId: null,
     guestScreenStreamId: null,
     sync: null,
   });
+}
+
+// ─── Presence & cleanup ────────────────────────────────────────────────────
+
+export async function setPresence(
+  roomId: string,
+  role: 'host' | 'guest',
+  online: boolean,
+): Promise<void> {
+  const field = role === 'host' ? 'hostOnline' : 'guestOnline';
+  await updateDoc(doc(db, 'rooms', roomId), { [field]: online });
+}
+
+const SUBCOLLECTIONS = ['offerCandidates', 'answerCandidates', 'reactions', 'messages'];
+
+export async function pruneRoomIfEmpty(roomId: string): Promise<void> {
+  const snap = await getDoc(doc(db, 'rooms', roomId));
+  if (!snap.exists()) return;
+
+  const { hostOnline, guestOnline } = snap.data() as {
+    hostOnline?: boolean;
+    guestOnline?: boolean;
+  };
+  if (hostOnline || guestOnline) return; // someone is still here
+
+  // Delete all subcollection documents first, then the room itself.
+  await Promise.all(
+    SUBCOLLECTIONS.map(async (sub) => {
+      const subSnap = await getDocs(collection(db, 'rooms', roomId, sub));
+      await Promise.all(subSnap.docs.map((d) => deleteDoc(d.ref)));
+    }),
+  );
+  await deleteDoc(doc(db, 'rooms', roomId));
+  console.log('[signaling] pruned empty room:', roomId);
 }
 
 export async function roomExists(roomId: string): Promise<boolean> {
