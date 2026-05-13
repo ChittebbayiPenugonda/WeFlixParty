@@ -8,7 +8,6 @@ import { useAudioDucking } from '@/hooks/useAudioDucking';
 import FaceCam from './FaceCam';
 import DraggableVideo from './DraggableVideo';
 import ReactionBar from './ReactionBar';
-import VideoPlayer from './VideoPlayer';
 import Controls from './Controls';
 import ChatSidebar from './ChatSidebar';
 
@@ -160,18 +159,24 @@ export default function Room({ roomId, isHost }: RoomProps) {
       if (e.code !== 'Space' || e.repeat) return;
       const tag = (e.target as HTMLElement).tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      // preventDefault + stopPropagation in capture phase so the focused
+      // button never sees the space key and doesn't activate/toggle.
       e.preventDefault();
+      e.stopPropagation();
       handleDuckStart();
     };
     const up = (e: KeyboardEvent) => {
       if (e.code !== 'Space') return;
+      e.preventDefault();
+      e.stopPropagation();
       handleDuckEnd();
     };
-    window.addEventListener('keydown', down);
-    window.addEventListener('keyup', up);
+    // capture:true — runs before any focused element handles the event
+    window.addEventListener('keydown', down, true);
+    window.addEventListener('keyup', up, true);
     return () => {
-      window.removeEventListener('keydown', down);
-      window.removeEventListener('keyup', up);
+      window.removeEventListener('keydown', down, true);
+      window.removeEventListener('keyup', up, true);
     };
   }, [handleDuckStart, handleDuckEnd]);
 
@@ -210,13 +215,13 @@ export default function Room({ roomId, isHost }: RoomProps) {
     <div className="flex h-full">
       <div className="relative flex-1 bg-zinc-950 overflow-hidden">
 
-        {/* ── background: video file player (always visible behind floating windows) ── */}
-        <div className="absolute inset-0 flex items-center justify-center">
-          <VideoPlayer
-            roomId={roomId}
-            onAudioStream={(s) => { if (s) connectMovieAudio(s); }}
-          />
-        </div>
+        {/* ── background: idle placeholder when nothing is being shared ── */}
+        {!localScreenStream && !remoteScreenStream && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 text-white/20 select-none">
+            <div className="text-6xl">🖥️</div>
+            <p className="text-sm">Share your screen to start watching together</p>
+          </div>
+        )}
 
         {/* ── waiting overlay ── */}
         {step === 'waiting' && (
